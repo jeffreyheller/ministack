@@ -10577,7 +10577,6 @@ def _cw_metric_alarm_record(name, props):
     period = int(props.get("Period", 60))
     eval_periods = int(props.get("EvaluationPeriods", 1))
     dta = props.get("DatapointsToAlarm")
-    datapoints = int(dta if dta is not None else eval_periods)
     ext_stat = props.get("ExtendedStatistic") or None
     if isinstance(ext_stat, str) and not ext_stat.strip():
         ext_stat = None
@@ -10614,7 +10613,6 @@ def _cw_metric_alarm_record(name, props):
         "ExtendedStatistic": ext_stat,
         "Period": period,
         "EvaluationPeriods": eval_periods,
-        "DatapointsToAlarm": datapoints,
         "Threshold": float(props["Threshold"]),
         "ComparisonOperator": comparison,
         "TreatMissingData": treat,
@@ -10635,6 +10633,10 @@ def _cw_metric_alarm_record(name, props):
         "Unit": props.get("Unit"),
         "AlarmConfigurationUpdatedTimestamp": int(time.time()),
     }
+    # As with PutMetricAlarm, AWS describes DatapointsToAlarm only while the
+    # template sets it, on create and on update.
+    if dta is not None:
+        alarm["DatapointsToAlarm"] = int(dta)
     return alarm
 
 
@@ -10835,7 +10837,17 @@ def _apigw_v2_stage_props(props):
         "description": props.get("Description", ""),
         "defaultRouteSettings": props.get("DefaultRouteSettings", {}),
         "routeSettings": props.get("RouteSettings", {}),
+        "accessLogSettings": _apigw_v2_access_log_settings(props.get("AccessLogSettings")),
+        "clientCertificateId": props.get("ClientCertificateId"),
+        "deploymentId": props.get("DeploymentId"),
     }
+
+
+def _apigw_v2_access_log_settings(settings):
+    if not settings:
+        return None
+    return {k: settings[key] for k, key in (("destinationArn", "DestinationArn"), ("format", "Format"))
+            if settings.get(key)}
 
 
 def _apigw_v2_stage_create(logical_id, props, stack_name):
@@ -11062,6 +11074,8 @@ def _apigw_v2_route_props(props):
         "operationName": props.get("OperationName", ""),
         "requestModels": props.get("RequestModels", {}),
         "requestParameters": props.get("RequestParameters", {}),
+        "modelSelectionExpression": props.get("ModelSelectionExpression"),
+        "routeResponseSelectionExpression": props.get("RouteResponseSelectionExpression"),
     }
 
 
