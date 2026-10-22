@@ -9,6 +9,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - **S3 — access point policies and unsigned requests** — an access point policy was stored but never applied, and an unsigned request through an access point was served. With `AUTH=true` a request through an access point alias or ARN is allowed on the access point by an identity policy or the access point policy (a Deny in either refuses it), and an unsigned one gets 400 `InvalidRequest`; S3 Control calls on the access point are unaffected. Contributed by @iot-rocket.
+- **API Gateway v2 — WebSocket connections, image functions and dropped fields** — `DeleteConnection` answered 204 but left the socket open; it now sends the client a close frame, `GetConnection` and `PostToConnection` answer 410 `GoneException`, and `$disconnect` runs after the close. A WebSocket route whose Lambda is a container image or a runtime other than Python or Node.js answered an empty 200 without running it; the function now runs. Routes keep `RouteResponseSelectionExpression` and `ModelSelectionExpression`, and stages keep `AccessLogSettings`, `ClientCertificateId` and `DeploymentId`, also from CloudFormation. Reported by @cupidchan.
 
 ## [1.5.31] — 2026-10-21
 
