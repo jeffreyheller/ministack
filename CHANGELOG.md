@@ -7,6 +7,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Cognito — signing keys, managed login and federated users** — every user pool signed with one shared key (`kid` `ministack-key-1`); each pool now has two keys of its own, one for access tokens and one for ID tokens, both published at its JWKS URI, and a token verifies only against its own pool. Managed login refuses PKCE `plain` and a `code_challenge` without `S256` (`error=invalid_request`), any `redirect_uri` the client didn't register, also for a client with no callback URLs, and a `grant_type` other than `authorization_code`, `refresh_token` or `client_credentials` (400 `unsupported_grant_type`). Adding an identity provider creates the group `<user pool id>_<provider name>`, and a federated user's new profile joins it and carries its `identities`, so the ID token has both claims. Reported by @cupidchan.
+
 ## [1.5.31] — 2026-10-21
 
 ### Added
