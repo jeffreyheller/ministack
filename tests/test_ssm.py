@@ -1122,3 +1122,165 @@ def test_unicode_ssm_parameter(ssm):
     ssm.put_parameter(Name="/unicode/param", Value="값: τιμή", Type="String")
     resp = ssm.get_parameter(Name="/unicode/param")
     assert resp["Parameter"]["Value"] == "값: τιμή"
+
+
+_HT = "/ssm/parameter-store/high-throughput-enabled"
+_HT_ARN = "arn:aws:ssm:us-east-1:000000000000:servicesetting" + _HT
+_TIER = "/ssm/parameter-store/default-parameter-tier"
+# GetServiceSetting on AWS in us-east-1 (2026-10-10, 2026-10-22), except high-throughput-enabled's, from us-west-2
+# (2026-10-22); us-west-2's dates differ for the other ids, and MiniStack returns these values in every region.
+_OBSERVED_DEFAULTS = {
+    _HT: ("false", 1555532571.138),
+    _TIER: ("Standard", 1565131339.38),
+    "/ssm/documents/console/public-sharing-permission": ("Enable", 1612382724.747),
+    "/ssm/managed-instance/activation-tier": ("standard", 1579134984.656),
+    "/ssm/managed-instance/default-ec2-instance-management-role": ("$None", 1636561263.576),
+    "/ssm/automation/customer-script-log-destination": ("None", 1572919724.731),
+    "/ssm/automation/customer-script-log-group-name": ("/aws/ssm/automation/executeScript", 1572898415.256),
+    "/ssm/automation/enable-adaptive-concurrency": ("False", 1632330231.776),
+    "/ssm/appmanager/appmanager-enabled": ("False", 1604983265.572),
+    "/ssm/opsinsights/opscenter": ("Disabled", 1622077352.094),
+}
+# UpdateServiceSetting's accepted values and the pattern its ValidationException names (AWS, us-west-2 2026-10-22,
+# default-parameter-tier us-east-1 2026-10-10).
+_ACCEPTED = {
+    _HT: (("true", "false"), "true|false"),
+    _TIER: (("Standard", "Advanced", "Intelligent-Tiering"), "Standard|Advanced|Intelligent-Tiering"),
+    "/ssm/documents/console/public-sharing-permission": (("Enable", "Disable"), "(^Enable$)|(^Disable$)"),
+    "/ssm/managed-instance/activation-tier": (("standard", "advanced"), "standard|advanced"),
+    "/ssm/appmanager/appmanager-enabled": (("True", "False"), "True|False"),
+    "/ssm/opsinsights/opscenter": (("Enabled", "Disabled"), "Enabled|Disabled"),
+}
+
+
+@pytest.fixture
+def service_settings(ssm):
+    yield ssm
+    for setting_id in _OBSERVED_DEFAULTS:
+        ssm.reset_service_setting(SettingId=setting_id)
+
+
+def _error_code(call, **kwargs):
+    with pytest.raises(ClientError) as exc:
+        call(**kwargs)
+    return exc.value.response["Error"]
+
+
+def test_ssm_service_setting_defaults(service_settings):
+    """GetServiceSetting answers every documented id with its default.
+    AWS: captured 2026-10-10 and 2026-10-22, us-east-1 (high-throughput-enabled: 2026-10-22, us-west-2)"""
+    for setting_id, (default, modified) in _OBSERVED_DEFAULTS.items():
+        setting = service_settings.get_service_setting(SettingId=setting_id)["ServiceSetting"]
+        setting["LastModifiedDate"] = round(setting["LastModifiedDate"].timestamp(), 3)
+        assert setting == {
+            "SettingId": setting_id,
+            "SettingValue": default,
+            "LastModifiedDate": modified,
+            "LastModifiedUser": "System",
+            "ARN": f"arn:aws:ssm:us-east-1:000000000000:servicesetting{setting_id}",
+            "Status": "Default",
+        }
+
+
+def test_ssm_service_setting_id_errors():
+    """GetServiceSetting's answers to an empty, unqualified, unknown or foreign SettingId, all HTTP 400.
+    AWS: captured 2026-10-22, us-west-2"""
+    west = boto3.client("ssm", endpoint_url=os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566"),
+                        region_name="us-west-2", aws_access_key_id="test", aws_secret_access_key="test",
+                        config=Config(parameter_validation=False))
+    own = "arn:aws:ssm:us-west-2:000000000000:"
+    east_arn = "arn:aws:ssm:us-east-1:000000000000:servicesetting/ssm/opsinsights/opscenter"
+    other_account_arn = "arn:aws:ssm:us-west-2:111111111111:servicesetting/ssm/opsinsights/opscenter"
+    unqualified = "The setting id must have fully qualified setting path."
+    cases = {
+        None: ("ValidationException", "The field SettingId cannot be empty."),
+        "": ("ValidationException", "The field SettingId cannot be empty."),
+        "nope": ("ValidationException", unqualified),
+        "/ssm/nope": ("ValidationException", unqualified),
+        "/ssm/opsinsights/opscenter/": ("ValidationException", unqualified),
+        own + "parameter/ssm/opsinsights/opscenter": (
+            "ValidationException", 'Invalid settingId in ARN format. Relative Id must start with " servicesetting" . '),
+        east_arn: ("ValidationException", f"Invalid settingId : {east_arn}."),
+        other_account_arn: ("ValidationException", f"Invalid settingId : {other_account_arn}."),
+        own + "servicesetting/ssm/opsinsights/nope": ("ServiceSettingNotFound", ""),
+        "/ssm/parameter-store/does-not-exist": ("ServiceSettingNotFound", ""),
+        "/ssm/opsinsights/nope": ("ServiceSettingNotFound", ""),
+        "/ssm/nope/deeper/still": ("ServiceSettingNotFound", ""),
+        "/SSM/opsinsights/opscenter": ("ServiceSettingNotFound", ""),
+        "arn:aws:ssm": ("ValidationException", "Invalid arn: arn:aws:ssm"),
+    }
+    for setting_id, expected in cases.items():
+        with pytest.raises(ClientError) as exc:
+            west.get_service_setting(**({} if setting_id is None else {"SettingId": setting_id}))
+        error = exc.value.response
+        assert (error["Error"]["Code"], error["Error"]["Message"], error["ResponseMetadata"]["HTTPStatusCode"]) == (
+            *expected, 400), setting_id
+    assert west.get_service_setting(SettingId=own + "servicesetting/ssm/opsinsights/opscenter")[
+        "ServiceSetting"]["SettingId"] == "/ssm/opsinsights/opscenter"
+
+
+def test_ssm_service_setting_update_and_reset(service_settings):
+    """UpdateServiceSetting customizes a setting as the caller; ResetServiceSetting restores the default.
+    AWS: captured 2026-10-10, us-east-1 (UpdateServiceSetting with an ARN answers an empty body; the setting reads
+    Customized by the caller) and 2026-10-22, us-west-2 (ResetServiceSetting of a setting at its default answers it,
+    Status Default, LastModifiedUser System; UpdateServiceSetting without a SettingValue). Resetting a customized
+    setting follows the ResetServiceSetting API reference example (documentation)."""
+    ssm = service_settings
+    assert ssm.update_service_setting(SettingId=_HT_ARN, SettingValue="true")["ResponseMetadata"]["HTTPStatusCode"] == 200
+    setting = ssm.get_service_setting(SettingId=_HT)["ServiceSetting"]
+    assert (setting["SettingValue"], setting["Status"]) == ("true", "Customized")
+    # The caller as MiniStack attributes it everywhere (`caller_arn()`): the account root unless AUTH=true pins a principal.
+    assert "LastModifiedDate" in setting and setting["LastModifiedUser"] == "arn:aws:iam::000000000000:root"
+    reset = ssm.reset_service_setting(SettingId=_HT_ARN)["ServiceSetting"]
+    assert (reset["SettingValue"], reset["Status"], reset["LastModifiedUser"]) == ("false", "Default", "System")
+    # A missing required member is a ValidationException, never a stored null.
+    unchecked = boto3.client("ssm", endpoint_url=ssm.meta.endpoint_url, region_name="us-east-1",
+                             aws_access_key_id="test", aws_secret_access_key="test",
+                             config=Config(parameter_validation=False))
+    error = _error_code(unchecked.update_service_setting, SettingId=_HT)
+    assert (error["Code"], error["Message"]) == (
+        "ValidationException",
+        "1 validation error detected: Value null at 'settingValue' failed to satisfy constraint: Member must not be null",
+    )
+    assert ssm.get_service_setting(SettingId=_HT)["ServiceSetting"]["SettingValue"] == "false"
+
+
+def test_ssm_service_setting_value_validation(service_settings):
+    """UpdateServiceSetting refuses a value outside the id's pattern and leaves the setting as it was.
+    AWS: captured 2026-10-22, us-west-2, and 2026-10-10, us-east-1 (default-parameter-tier)"""
+    ssm = service_settings
+    for setting_id, (accepted, pattern) in _ACCEPTED.items():
+        error = _error_code(ssm.update_service_setting, SettingId=setting_id, SettingValue="NotAValue")
+        assert (error["Code"], error["Message"]) == (
+            "ValidationException", f"Invalid setting value, allowed value pattern: {pattern}")
+        assert ssm.get_service_setting(SettingId=setting_id)["ServiceSetting"]["Status"] == "Default"
+        for value in accepted:
+            ssm.update_service_setting(SettingId=setting_id, SettingValue=value)
+
+
+def test_ssm_service_setting_per_region(service_settings):
+    """A setting is per region, and its ARN names the region.
+    AWS: captured 2026-10-22, us-east-1 (Customized) and us-west-2 (Default)"""
+    west = _regional_ssm("us-west-2")
+    try:
+        west.update_service_setting(SettingId=_HT, SettingValue="true")
+        assert service_settings.get_service_setting(SettingId=_HT)["ServiceSetting"]["Status"] == "Default"
+        assert west.get_service_setting(SettingId=_HT)["ServiceSetting"]["ARN"].startswith("arn:aws:ssm:us-west-2:")
+    finally:
+        west.reset_service_setting(SettingId=_HT)
+
+
+def test_ssm_service_setting_persisted():
+    """An updated setting survives MiniStack's state save and load (MiniStack persistence, no AWS behaviour)."""
+    from ministack.services import ssm as ssm_service
+
+    ssm_service.reset()
+    try:
+        ssm_service._update_service_setting({"SettingId": _HT, "SettingValue": "true"})
+        saved = ssm_service.get_state()
+        ssm_service.reset()
+        ssm_service.load_persisted_state(saved)
+        body = json.loads(ssm_service._get_service_setting({"SettingId": _HT})[2])
+    finally:
+        ssm_service.reset()
+    assert body["ServiceSetting"]["SettingValue"] == "true"

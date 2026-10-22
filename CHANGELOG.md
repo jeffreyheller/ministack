@@ -7,6 +7,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **SSM — service settings** — `GetServiceSetting`, `UpdateServiceSetting` and `ResetServiceSetting`, per account and region, persisted, with the ten settings' AWS defaults. `SettingValue` is checked against each setting's AWS value pattern (high-throughput-enabled, default-parameter-tier, public-sharing-permission, activation-tier, appmanager-enabled, opscenter), and a bad or unknown `SettingId` gets AWS's error. Unblocks Terraform's `aws_ssm_service_setting`. Contributed by @jeffreyheller.
+
 ### Fixed
 - **S3 — bucket policy writes through an access point** — under `AUTH=true` `PutBucketPolicy` and `DeleteBucketPolicy` sent through an access point alias or ARN changed the bucket's policy; they now get 403 `AccessDenied` with an explicit deny on the access point, while `GetBucketPolicy` through it and both writes on the bucket itself work as before. Contributed by @iot-rocket.
 - **S3 — SigV2 requests through an access point** — under `AUTH=true` a SigV2 presigned URL for an access point ARN failed its signature check, because the check signed the access point host as a bucket, and a SigV2 `Authorization` header through an access point alias or ARN was served. The presigned URL is now checked on its path as the SDK signs it, and the header request gets 400 `InvalidRequest`. Contributed by @iot-rocket.

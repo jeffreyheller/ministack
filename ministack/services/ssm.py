@@ -8,7 +8,8 @@ Supports: PutParameter, GetParameter, GetParameters, GetParametersByPath,
           GetParameterHistory, LabelParameterVersion,
           AddTagsToResource, RemoveTagsFromResource, ListTagsForResource,
           SendCommand, GetCommandInvocation, ListCommands,
-          DescribeInstanceInformation.
+          DescribeInstanceInformation,
+          GetServiceSetting, UpdateServiceSetting, ResetServiceSetting.
 """
 
 import base64
@@ -16,10 +17,12 @@ import copy
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 from ministack.core.arn import ArnParseError, parse_arn
 from ministack.core.concurrency import spawn_background
+from ministack.core.iam_evaluator import caller_arn
 from ministack.core.responses import (
     AccountRegionScopedDict,
     AccountScopedDict,
@@ -40,6 +43,32 @@ _parameters = AccountRegionScopedDict()
 _parameter_history = AccountRegionScopedDict()
 _tags = AccountRegionScopedDict()
 _commands = AccountRegionScopedDict()
+_service_settings = AccountRegionScopedDict()
+
+# SettingIds are the botocore ssm model's list. (default value, default LastModifiedDate) observed on AWS with
+# GetServiceSetting in us-east-1 (2026-10-10, 2026-10-22), except high-throughput-enabled's, observed in us-west-2
+# (2026-10-22); us-west-2's dates differ for the other ids, and MiniStack returns these values in every region.
+_SERVICE_SETTING_DEFAULTS = {
+    "/ssm/parameter-store/high-throughput-enabled": ("false", 1555532571.138),
+    "/ssm/parameter-store/default-parameter-tier": ("Standard", 1565131339.38),
+    "/ssm/documents/console/public-sharing-permission": ("Enable", 1612382724.747),
+    "/ssm/managed-instance/activation-tier": ("standard", 1579134984.656),
+    "/ssm/managed-instance/default-ec2-instance-management-role": ("$None", 1636561263.576),
+    "/ssm/automation/customer-script-log-destination": ("None", 1572919724.731),
+    "/ssm/automation/customer-script-log-group-name": ("/aws/ssm/automation/executeScript", 1572898415.256),
+    "/ssm/automation/enable-adaptive-concurrency": ("False", 1632330231.776),
+    "/ssm/appmanager/appmanager-enabled": ("False", 1604983265.572),
+    "/ssm/opsinsights/opscenter": ("Disabled", 1622077352.094),
+}
+# The value pattern UpdateServiceSetting enforces, as AWS's ValidationException names it (us-west-2, us-east-1).
+_SERVICE_SETTING_VALUE_PATTERNS = {
+    "/ssm/parameter-store/high-throughput-enabled": "true|false",
+    "/ssm/parameter-store/default-parameter-tier": "Standard|Advanced|Intelligent-Tiering",
+    "/ssm/documents/console/public-sharing-permission": "(^Enable$)|(^Disable$)",
+    "/ssm/managed-instance/activation-tier": "standard|advanced",
+    "/ssm/appmanager/appmanager-enabled": "True|False",
+    "/ssm/opsinsights/opscenter": "Enabled|Disabled",
+}
 
 
 # ── Persistence ────────────────────────────────────────────
@@ -50,6 +79,7 @@ def get_state():
         "parameter_history": copy.deepcopy(_parameter_history),
         "tags": copy.deepcopy(_tags),
         "commands": copy.deepcopy(_commands),
+        "service_settings": copy.deepcopy(_service_settings),
     }
 
 
@@ -106,6 +136,7 @@ def _restore_state(data):
         _restore_parameter_history(data.get("parameter_history", {}))
         _tags.update(data.get("tags", {}))
         _commands.update(data.get("commands", {}))
+        _service_settings.update(data.get("service_settings", {}))
 
 
 def _now_iso() -> str:
@@ -248,6 +279,9 @@ async def handle_request(method, path, headers, body, query_params):
         "GetCommandInvocation": _get_command_invocation,
         "ListCommands": _list_commands,
         "DescribeInstanceInformation": _describe_instance_information,
+        "GetServiceSetting": _get_service_setting,
+        "UpdateServiceSetting": _update_service_setting,
+        "ResetServiceSetting": _reset_service_setting,
     }
 
     handler = handlers.get(action)
@@ -1082,7 +1116,82 @@ def _describe_instance_information(data):
     return json_response(out)
 
 
+def _service_setting_id(data):
+    """(setting id, None) for the SettingId or its ARN, or (None, the error response AWS answers)."""
+    setting_id = data.get("SettingId") or ""
+    if not setting_id:
+        return None, error_response_json("ValidationException", "The field SettingId cannot be empty.", 400)
+    if setting_id.startswith("arn:"):
+        try:
+            spec = parse_arn(setting_id)
+        except ArnParseError:
+            return None, error_response_json("ValidationException", f"Invalid arn: {setting_id}", 400)
+        if not spec.resource.startswith("servicesetting"):
+            return None, error_response_json(
+                "ValidationException",
+                'Invalid settingId in ARN format. Relative Id must start with " servicesetting" . ',
+                400,
+            )
+        if spec.account_id != get_account_id() or spec.region != get_region():
+            return None, error_response_json("ValidationException", f"Invalid settingId : {setting_id}.", 400)
+        setting_id = spec.resource[len("servicesetting"):]
+    if not re.fullmatch(r"/[^/]+(?:/[^/]+){2,}", setting_id):
+        return None, error_response_json(
+            "ValidationException", "The setting id must have fully qualified setting path.", 400
+        )
+    if setting_id not in _SERVICE_SETTING_DEFAULTS:
+        return None, error_response_json("ServiceSettingNotFound", "", 400)
+    return setting_id, None
+
+
+def _service_setting_out(setting_id):
+    default_value, default_date = _SERVICE_SETTING_DEFAULTS[setting_id]
+    stored = _service_settings.get(setting_id)
+    return {
+        "SettingId": setting_id,
+        "SettingValue": stored["value"] if stored else default_value,
+        "LastModifiedDate": stored["modified"] if stored else default_date,
+        "LastModifiedUser": stored["user"] if stored else "System",
+        "ARN": f"arn:aws:ssm:{get_region()}:{get_account_id()}:servicesetting{setting_id}",
+        "Status": "Customized" if stored else "Default",
+    }
+
+
+def _get_service_setting(data):
+    setting_id, error = _service_setting_id(data)
+    if error:
+        return error
+    return json_response({"ServiceSetting": _service_setting_out(setting_id)})
+
+
+def _update_service_setting(data):
+    value = data.get("SettingValue")
+    if value is None:
+        return error_response_json(
+            "ValidationException",
+            "1 validation error detected: Value null at 'settingValue' failed to satisfy constraint: Member must not be null",
+            400,
+        )
+    setting_id, error = _service_setting_id(data)
+    if error:
+        return error
+    pattern = _SERVICE_SETTING_VALUE_PATTERNS.get(setting_id)
+    if pattern and not re.fullmatch(pattern, value):
+        return error_response_json("ValidationException", f"Invalid setting value, allowed value pattern: {pattern}", 400)
+    _service_settings[setting_id] = {"value": value, "modified": _now_epoch(), "user": caller_arn()}
+    return json_response({})
+
+
+def _reset_service_setting(data):
+    setting_id, error = _service_setting_id(data)
+    if error:
+        return error
+    _service_settings.pop(setting_id, None)
+    return json_response({"ServiceSetting": _service_setting_out(setting_id)})
+
+
 def reset():
+    _service_settings.clear()
     _parameters.clear()
     _parameter_history.clear()
     _tags.clear()
