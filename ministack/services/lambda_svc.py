@@ -2419,11 +2419,15 @@ def _create_function(data: dict):
         "provisioned_concurrency": {},
     }
 
+    response = config
     if data.get("Publish"):
+        # AWS-match: Publish answers the new version number while $LATEST stays "$LATEST".
         ver_num = _functions[name]["next_version"]
         _functions[name]["next_version"] = ver_num + 1
         ver_config = copy.deepcopy(config)
         ver_config["Version"] = str(ver_num)
+        ver_config["FunctionArn"] = f"{_func_arn(name)}:{ver_num}"
+        ver_config["RevisionId"] = new_uuid()
         ver_record = {
             "config": ver_config,
             "code_zip": code_zip,
@@ -2431,12 +2435,12 @@ def _create_function(data: dict):
         _functions[name]["versions"][str(ver_num)] = ver_record
         if _stamp_snapstart_published_version(ver_config):
             _snapstart_provision_version_async(name, ver_record)
-        config["Version"] = str(ver_num)
+        response = {**config, "Version": str(ver_num)}
 
     _schedule_state_transition(name, _LAMBDA_STATE_TRANSITION_DELAY)
     runtime_or_image = config.get("Runtime") or ("image=" + image_uri if image_uri else "?")
     logger.info("Lambda function created: %s (%s)", name, runtime_or_image)
-    return json_response(config, 201)
+    return json_response(response, 201)
 
 
 def _get_function(name: str, qualifier: str | None = None):
@@ -2888,6 +2892,8 @@ def _update_code(name: str, data: dict):
         func["next_version"] = ver_num + 1
         ver_config = copy.deepcopy(func["config"])
         ver_config["Version"] = str(ver_num)
+        ver_config["FunctionArn"] = f"{_func_arn(name)}:{ver_num}"
+        ver_config["RevisionId"] = new_uuid()
         ver_record = {
             "config": ver_config,
             "code_zip": func.get("code_zip"),
@@ -2895,7 +2901,7 @@ def _update_code(name: str, data: dict):
         func["versions"][str(ver_num)] = ver_record
         if _stamp_snapstart_published_version(ver_config):
             _snapstart_provision_version_async(name, ver_record)
-        func["config"]["Version"] = str(ver_num)
+        return json_response(ver_config)
 
     return json_response(func["config"])
 

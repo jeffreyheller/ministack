@@ -2143,6 +2143,32 @@ def test_lambda_update_code_publish_version(lam):
     versions = [v["Version"] for v in resp["Versions"] if v["Version"] != "$LATEST"]
     assert len(versions) >= 1
 
+def test_lambda_publish_on_create_and_update_leaves_latest_unpublished(lam):
+    """AWS: captured 2026-10-22, us-west-2 (CreateFunction and UpdateFunctionCode with Publish: their responses,
+    ListVersionsByFunction, GetFunctionConfiguration of $LATEST and of each version)."""
+    name = "lam-publish-leaves-latest"
+    created = lam.create_function(
+        FunctionName=name,
+        Runtime="python3.11",
+        Role=_LAMBDA_ROLE,
+        Handler="index.handler",
+        Code={"ZipFile": _make_zip("def handler(event, context): return 1")},
+        Publish=True,
+    )
+    assert created["Version"] == "1"
+    assert created["FunctionArn"].endswith(f":function:{name}")
+    first = lam.get_function_configuration(FunctionName=name, Qualifier="1")
+    assert first["FunctionArn"].endswith(f":function:{name}:1")
+    assert first["RevisionId"] != created["RevisionId"]
+    updated = lam.update_function_code(FunctionName=name, ZipFile=_make_zip("def handler(event, context): return 2"), Publish=True)
+    versions = [v["Version"] for v in lam.list_versions_by_function(FunctionName=name)["Versions"]]
+    assert versions == ["$LATEST", "1", "2"]
+    latest = lam.get_function_configuration(FunctionName=name)
+    assert latest["Version"] == "$LATEST"
+    assert updated["FunctionArn"].endswith(f":function:{name}:2")
+    assert updated["RevisionId"] != latest["RevisionId"]
+
+
 def test_lambda_nodejs_promise_handler(lam):
     code = (
         "exports.handler = (event) => Promise.resolve({ promise: true, val: event.x });"

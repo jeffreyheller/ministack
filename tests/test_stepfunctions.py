@@ -1598,12 +1598,14 @@ def test_sfn_aws_sdk_lambda_write_actions_and_pascal_outputs(sfn_sync, lam):
         assert output["createResult"]["KmsKeyArn"] == kms_key_arn
         assert output["createResult"]["VpcConfig"] == response_vpc_config
         assert output["updateConfigurationResult"]["Timeout"] == 30
-        assert output["publishedFunction"]["FunctionArn"] == function_arn
+        # UpdateFunctionCode with Publish answers the published version (AWS, captured 2026-10-22, us-west-2).
+        assert output["publishedFunction"]["FunctionArn"] == f"{function_arn}:2"
         assert output["publishedFunction"]["Version"] == "2"
         assert output["aliasResult"]["FunctionVersion"] == "2"
         assert output["alias"]["Name"] == "live"
         assert output["alias"]["FunctionVersion"] == "2"
-        assert output["config"]["FunctionArn"] == function_arn
+        # GetFunctionConfiguration with a Qualifier answers that version's ARN (AWS, captured 2026-10-22, us-west-2).
+        assert output["config"]["FunctionArn"] == f"{function_arn}:2"
         assert output["config"]["Version"] == "2"
         assert output["config"]["Timeout"] == 30
         assert output["config"]["State"] == "Active"
